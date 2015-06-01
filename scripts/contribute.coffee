@@ -2,15 +2,26 @@
 #   Welcome new potential contributors when they enter your IRC channel.
 #   Channel and message based on data in your contribute.json file.
 #
+#   contribute.json: http://www.contributejson.org/
+#
 # Configuration:
 #   HUBOT_CONTRIBUTE_WELCOME_WAIT: seconds to wait after a new user joins (default 60)
+#   HUBOT_CONTRIBUTE_ENABLE_CRON: set to "true" to update contribute.json data daily.
+#
+# Dependencies:
+#   "hubot-cronjob": "^0.2.0"
 #
 # Commands:
-#   User must have the "contributejson" role via the hubot-auth script.
+#   hubot: add contributejson <url>: Add a contribute.json URL to the list and join the channel in the file.
+#   hubot: rm contributejson [url]: Remove a contribute.json URL from the list and leave the channel.
+#   hubot: update contributejson [url]: Update the data for the contribute.json URL or channel.
 #
-#   list contributejson: List the urls the bot currently knows.
-#   add contributejson <url>: Add a contribute.json URL to the list and join the channel in the file.
-#   rm contributejson <url>: Remove a contribute.json URL from the list and leave the channel.
+# Notes:
+#   * Commands require the user to have the "contributejson" role via the hubot-auth script.
+#   * A persistent brain store like hubot-redis-brain is highly recommended.
+#
+# Author:
+#   pmclanahan
 
 
 contribute_json_valid = (data) ->
@@ -42,11 +53,11 @@ class ContributeBot
 
     @robot.brain.on 'loaded', =>
       robot.brain.data.contributebot ||= {}
-      # key = channel, value = contribute.json data
+      # URL: contribute.json data
       robot.brain.data.contributebot.data ||= {}
-      # key = channel, value = contribute.json URL
+      # channel: contribute.json URL
       robot.brain.data.contributebot.channels ||= {}
-      # key = channel, value = array of nicks
+      # channel: array of nicks
       robot.brain.data.contributebot.users ||= {}
       @brain = robot.brain.data.contributebot
       @init_listeners()
@@ -66,7 +77,7 @@ class ContributeBot
     data = @get_channel_data(room)
     nicks = format_nick_list @newcomers[room]
     delete @newcomer_timeouts[room]
-    reply.push "Hi there #{nicks}! Welcome to #{room} where we discuss the #{data.name} project. " +
+    reply.push "Hi there #{nicks}. Welcome to #{room} where we discuss the #{data.name} project. " +
                "We're happy you're here!"
     reply.push "I'm just a bot, but I wanted to say hi since the channel is quiet at the moment."
     if 'irc-contacts' of data.participate
@@ -81,7 +92,7 @@ class ContributeBot
                "to see if you'd like to help."
     if data.bugs.mentored?
       reply.push "We also have a list of mentored bugs that you may be interested in: #{data.bugs.mentored}"
-    reply.push "Thanks again for stopping by! I've been a hopefully helpful bot, and I won't bug you again."
+    reply.push "Thanks again for stopping by! I've been a hopefully helpful bot, and I won't bother you again."
 
     @process_room room
     reply
@@ -197,9 +208,8 @@ class ContributeBot
       unless self.is_authorized(res)
         return
 
-      if Object.keys(self.brain.data).length > 0
-        res.reply "Sure. Here ya go:"
-        res.send "- #{cj_url}" for own cj_url, x of self.brain.data
+      if Object.keys(self.brain.channels).length > 0
+        res.send "#{room}: #{cj_url}" for own room, cj_url of self.brain.channels
       else
         res.reply "Sorry. Empty list."
 
