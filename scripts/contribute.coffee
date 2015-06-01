@@ -12,6 +12,7 @@
 #   add contributejson <url>: Add a contribute.json URL to the list and join the channel in the file.
 #   rm contributejson <url>: Remove a contribute.json URL from the list and leave the channel.
 
+
 contribute_json_valid = (data) ->
   true if data? and data.name? and data.description? and data.participate?.irc?
 
@@ -21,17 +22,31 @@ get_irc_channel = (data) ->
   irc_url = data.participate.irc
   return irc_url.substring irc_url.indexOf('#'), irc_url.length
 
+format_nick_list = (nicks) ->
+  unless Array.isArray nicks
+    return nicks
+
+  unless nicks.length > 1
+    return nicks[0]
+
+  last_nick = nicks.pop()
+  return nicks.join(', ') + " and #{last_nick}"
+
 
 class ContributeBot
   constructor: (@robot, @welcome_wait) ->
     @newcomers = {}
+    @newcomer_timeouts = {}
     @brain = null
-    joined_channels = false
+    @joined_channels = false
 
     @robot.brain.on 'loaded', =>
       robot.brain.data.contributebot ||= {}
+      # key = channel, value = contribute.json data
       robot.brain.data.contributebot.data ||= {}
+      # key = channel, value = contribute.json URL
       robot.brain.data.contributebot.channels ||= {}
+      # key = channel, value = array of nicks
       robot.brain.data.contributebot.users ||= {}
       @brain = robot.brain.data.contributebot
       @init_listeners()
@@ -46,27 +61,30 @@ class ContributeBot
       res.reply "Sorry. You must have permission to do this thing."
       false
 
-  welcome_newcomer: (res) =>
-    {user, room} = res.message
+  welcome_newcomers: (room) =>
+    reply = []
     data = @get_channel_data(room)
-    contacts = data.participate['irc-contacts']?.join(', ')
-    res.reply "Hi there! Welcome to #{room} where we discuss #{data.name}: #{data.description}.
-               We're happy you're here!"
-    res.send "I just wanted to say hi since it appears no one is active at the moment."
-    if contacts?
-      res.send "The project leads (#{contacts}) will be around at some point and will have
-                the answers to questions you may have, so feel free to ask if you have any."
+    nicks = format_nick_list @newcomers[room]
+    delete @newcomer_timeouts[room]
+    reply.push "Hi there #{nicks}! Welcome to #{room} where we discuss the #{data.name} project. " +
+               "We're happy you're here!"
+    reply.push "I'm just a bot, but I wanted to say hi since the channel is quiet at the moment."
+    if 'irc-contacts' of data.participate
+      contacts = format_nick_list data.participate['irc-contacts'][..2]
+      reply.push "Some project members (like #{contacts}) will be around at some point and will have " +
+                 "the answers to questions you may have, so feel free to go ahead ask if you have any."
     else
-      res.send "There are people around who can answer questions you may have,
-                but aren't always paying attention to IRC. Just ask any time
-                and someone will get back to you when they can."
-    res.send "Until then you can check out our docs (#{data.participate.docs})
-              to see if you'd like to help."
+      reply.push "There are people around who can answer questions you may have, " +
+                 "but aren't always paying attention to IRC. Just ask any time " +
+                 "and someone will get back to you when they can."
+    reply.push "Until then you can check out our docs (#{data.participate.docs}) " +
+               "to see if you'd like to help."
     if data.bugs.mentored?
-      res.send "We also have a list of mentored bugs that you may be
-                interested in seeing: #{data.bugs.mentored}"
-    res.reply "Thanks again for stopping by! I've been a hopefully helpful bot,
-               and I won't bug you again."
+      reply.push "We also have a list of mentored bugs that you may be interested in: #{data.bugs.mentored}"
+    reply.push "Thanks again for stopping by! I've been a hopefully helpful bot, and I won't bug you again."
+
+    @process_room room
+    reply
 
   get_contribute_json: (json_url, callback) ->
     @robot.http(json_url).header('Accept', 'application/json').get() (err, res, body) ->
@@ -87,62 +105,93 @@ class ContributeBot
     if @joined_channels
       return
 
-    @robot.logger.debug "joining channels"
     for channel in Object.keys @brain.channels
-      @robot.logger.debug "- joining #{channel}"
       @robot.adapter.join channel
-      @robot.logger.info "Joined #{channel}"
 
     @joined_channels = true
+
+  add_known_nicks: (room, nicks) =>
+    @brain.users[room] ||= []
+    nicks = [nicks] unless Array.isArray nicks
+    for nick in nicks
+      unless nick in @brain.users[room]
+        @brain.users[room].push nick
+        @robot.logger.debug "Added #{nick} to #{room} list."
+
+  process_room: (room) ->
+    clearTimeout @newcomer_timeouts[room]
+    delete @newcomer_timeouts[room]
+    @add_known_nicks(room, @newcomers[room])
+    @newcomers[room] = []
+
+  update_contribute_data: =>
+    self = @
+    @robot.logger.debug 'Updating all contribute data.'
+    for cj_url, old_data of @brain.data
+      old_channel = get_irc_channel(old_data)
+      @get_contribute_json cj_url, (data) ->
+        if contribute_json_valid data
+          self.robot.logger.debug "Updated #{cj_url}"
+          self.brain.data[cj_url] = data
+          irc_channel = get_irc_channel(data)
+          unless irc_channel is old_channel
+            self.robot.adapter.join irc_channel
+            self.robot.adapter.part old_channel
+            self.brain.channels[irc_channel] = cj_url
+            delete self.brain.channels[old_channel]
+            delete self.brain.users[old_channel]
+        else
+          self.robot.logger.debug "Invalid contribute data: %j", data
+          res.reply "Something has gone wrong. Check the logs."
 
   init_listeners: ->
     self = @
 
     # only for IRC
-    @robot.adapter.bot.addListener 'names', (channel, nicks) ->
-      self.brain.users[channel] ||= []
-      for nick in Object.keys nicks
-        unless nick in self.brain.users[channel]
-          self.brain.users[channel].push nick
-          self.robot.logger.debug "Added #{nick} to #{channel} list."
+    if @robot.adapter.bot?.addListener?
+      @robot.adapter.bot.addListener 'names', (room, nicks) ->
+        self.add_known_nicks room, Object.keys nicks
 
-    @robot.adapter.bot.addListener 'nick', (old_nick, new_nick, channels, message) ->
-      for channel in channels
-        if channel of self.brain.users
-          self.brain.users[channel].push new_nick
+      @robot.adapter.bot.addListener 'nick', (old_nick, new_nick, channels, message) ->
+        for channel in channels
+          if channel of self.brain.users
+            self.add_known_nicks(channel, new_nick)
 
     # someone has entered the room
     # let's greet them in a minute
     @robot.enter (res) ->
-      if res.message.user.name is self.robot.name
-        if res.message.room in process.env.HUBOT_IRC_ROOMS.split ","
+      {user, room} = res.message
+      if user.name is self.robot.name
+        if room in process.env.HUBOT_IRC_ROOMS.split ","
           # bot has registered
           self.join_channels()
         return
 
       # only a channel for which we have data
-      unless res.message.room of self.brain.channels
+      unless room of self.brain.channels
         return
 
-      user = self.robot.brain.userForName(res.message.user.name)
-      if user.name in self.brain.users[res.message.room]
+      if user.name in self.brain.users[room]
         self.robot.logger.debug "Already know #{user.name}"
         return
 
-      user.newbe_timeout = setTimeout () ->
-        self.welcome_newcomer res
+      self.newcomers[room] ||= []
+      self.newcomers[room].push user.name
+
+      if self.newcomer_timeouts[room]?
+        clearTimeout self.newcomer_timeouts[room]
+
+      self.newcomer_timeouts[room] = setTimeout () ->
+        res.send msg for msg in self.welcome_newcomers room
       , self.welcome_wait * 1000
 
-      self.newcomers[res.message.room] ||= []
-      self.newcomers[res.message.room].push user
-
     @robot.hear /./, (res) ->
+      {user, room} = res.message
       # if there is any chatter don't welcome @newcomers
-      if self.newcomers[res.message.room]?.length
-        for user in self.newcomers[res.message.room]
-          clearTimeout user.newbe_timeout if user.newbe_timeout?
-
-        self.newcomers[res.message.room] = []
+      if self.newcomer_timeouts[room]?
+        # newcomers shouldn't cancel welcomes
+        unless user.name in self.newcomers[room]
+          self.process_room(room)
 
     @robot.respond /list contributejson$/i, (res) ->
       unless self.is_authorized(res)
@@ -154,11 +203,18 @@ class ContributeBot
       else
         res.reply "Sorry. Empty list."
 
-    @robot.respond /rm contributejson (http.+)$/i, (res) ->
+    @robot.respond /rm contributejson( http.+)?$/i, (res) ->
       unless self.is_authorized(res)
         return
 
-      cj_url = res.match[1].trim().toLowerCase()
+      if res.match[1]?
+        cj_url = res.match[1].trim().toLowerCase()
+      else
+        cj_url = self.brain.channels[res.message.room]
+        unless cj_url
+          res.reply "This channel doesn't seem to have a data source."
+          return
+
       if cj_url of self.brain.data
         irc_channel = get_irc_channel(self.brain.data[cj_url])
         self.robot.adapter.part(irc_channel)
@@ -169,11 +225,18 @@ class ContributeBot
       else
         res.reply "Don't see that one. Check the spelling?"
 
-    @robot.respond /update contributejson (http.+)$/i, (res) ->
+    @robot.respond /update contributejson( http.+)?$/i, (res) ->
       unless self.is_authorized(res)
         return
 
-      cj_url = res.match[1].trim().toLowerCase()
+      if res.match[1]?
+        cj_url = res.match[1].trim().toLowerCase()
+      else
+        cj_url = self.brain.channels[res.message.room]
+        unless cj_url
+          res.reply "This channel doesn't seem to have a data source."
+          return
+
       unless cj_url of self.brain.data
         res.reply "Don't have that one. Use the `add` command if you'd like to use this URL. Thanks!"
         return
@@ -193,6 +256,7 @@ class ContributeBot
             res.reply "Left #{old_channel}."
             self.brain.channels[irc_channel] = cj_url
             delete self.brain.channels[old_channel]
+            delete self.brain.users[old_channel]
         else
           self.robot.logger.debug "Invalid contribute data: %j", data
           res.reply "Something has gone wrong. Check the logs."
@@ -225,4 +289,9 @@ class ContributeBot
 
 module.exports = (robot) ->
   welcome_wait = process.env.HUBOT_CONTRIBUTE_WELCOME_WAIT or 60
-  new ContributeBot robot, welcome_wait
+  cb = new ContributeBot robot, welcome_wait
+
+  if process.env.HUBOT_CONTRIBUTE_ENABLE_CRON?
+    HubotCron = require 'hubot-cronjob'
+    # run every midnight
+    new HubotCron '0 0 0 * * *', 'America/Los_Angeles', cb.update_contribute_data
