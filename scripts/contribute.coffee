@@ -12,9 +12,10 @@
 #   "hubot-cronjob": "^0.2.0"
 #
 # Commands:
-#   hubot: add contributejson <url>: Add a contribute.json URL to the list and join the channel in the file.
-#   hubot: rm contributejson [url]: Remove a contribute.json URL from the list and leave the channel.
-#   hubot: update contributejson [url]: Update the data for the contribute.json URL or channel.
+#   hubot contributejson list: List the channels and contribute.json URLs known by the bot.
+#   hubot contributejson add <url>: Add a contribute.json URL to the list and join the channel in the file.
+#   hubot contributejson rm [url]: Remove a contribute.json URL from the list and leave the channel.
+#   hubot contributejson update [url]: Update the data for the contribute.json URL or channel.
 #
 # Notes:
 #   * Commands require the user to have the "contributejson" role via the hubot-auth script.
@@ -204,7 +205,7 @@ class ContributeBot
         unless user.name in self.newcomers[room]
           self.process_room(room)
 
-    @robot.respond /list contributejson$/i, (res) ->
+    @robot.respond /contributejson( list)?$/i, (res) ->
       unless self.is_authorized(res)
         return
 
@@ -213,7 +214,7 @@ class ContributeBot
       else
         res.reply "Sorry. Empty list."
 
-    @robot.respond /rm contributejson( http.+)?$/i, (res) ->
+    @robot.respond /contributejson (rm|remove|delete)( http.+)?$/i, (res) ->
       unless self.is_authorized(res)
         return
 
@@ -235,7 +236,7 @@ class ContributeBot
       else
         res.reply "Don't see that one. Check the spelling?"
 
-    @robot.respond /update contributejson( http.+)?$/i, (res) ->
+    @robot.respond /contributejson update( http.+)?$/i, (res) ->
       unless self.is_authorized(res)
         return
 
@@ -271,7 +272,7 @@ class ContributeBot
           self.robot.logger.debug "Invalid contribute data: %j", data
           res.reply "Something has gone wrong. Check the logs."
 
-    @robot.respond /add contributejson (http.+)$/i, (res) ->
+    @robot.respond /contributejson add (http.+)$/i, (res) ->
       unless self.is_authorized(res)
         return
 
